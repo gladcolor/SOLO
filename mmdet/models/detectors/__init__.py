@@ -22,5 +22,5 @@ __all__ = [
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
     'FastRCNN', 'FasterRCNN', 'MaskRCNN', 'CascadeRCNN', 'HybridTaskCascade',
     'DoubleHeadRCNN', 'RetinaNet', 'FCOS', 'GridRCNN', 'MaskScoringRCNN',
-    'RepPointsDetector', 'FOVEA', 'SingleStageInsDetector', 'SOLO'
+    'RepPointsDetector', 'FOVEA', 'SingleStageInsDetector', 'SOLO', 'VERT'
 ]
