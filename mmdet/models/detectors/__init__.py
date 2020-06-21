@@ -17,6 +17,7 @@ from .single_stage import SingleStageDetector
 from .single_stage_ins import SingleStageInsDetector
 from .two_stage import TwoStageDetector
 from .solo import SOLO
+from .vert import VERT
 
 __all__ = [
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',

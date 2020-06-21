@@ -31,8 +31,7 @@ def dice_loss(input, target):
     return 1-d
 
 @HEADS.register_module
-class VERTHead(nn.Module):
-
+class DecoupledVERTLightHead(nn.Module):
     def __init__(self,
                  num_classes,
                  in_channels,
@@ -44,12 +43,13 @@ class VERTHead(nn.Module):
                  sigma=0.4,
                  num_grids=None,
                  cate_down_pos=0,
-                 with_deform=False,
                  loss_ins=None,
                  loss_cate=None,
                  conv_cfg=None,
-                 norm_cfg=None):
-        super(VERTHead, self).__init__()
+                 norm_cfg=None,
+                 use_dcn_in_tower=False,
+                 type_dcn=None):
+        super(DecoupledVERTLightHead, self).__init__()
         self.num_classes = num_classes
         self.seg_num_grids = num_grids
         self.cate_out_channels = self.num_classes - 1
@@ -61,18 +61,25 @@ class VERTHead(nn.Module):
         self.cate_down_pos = cate_down_pos
         self.base_edge_list = base_edge_list
         self.scale_ranges = scale_ranges
-        self.with_deform = with_deform
         self.loss_cate = build_loss(loss_cate)
         self.ins_loss_weight = loss_ins['loss_weight']
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
+        self.use_dcn_in_tower = use_dcn_in_tower
+        self.type_dcn = type_dcn
         self._init_layers()
 
     def _init_layers(self):
         norm_cfg = dict(type='GN', num_groups=32, requires_grad=True)
         self.ins_convs = nn.ModuleList()
         self.cate_convs = nn.ModuleList()
+
         for i in range(self.stacked_convs):
+            if self.use_dcn_in_tower and i == self.stacked_convs - 1:
+                cfg_conv = dict(type=self.type_dcn)
+            else:
+                cfg_conv = self.conv_cfg
+
             chn = self.in_channels + 2 if i == 0 else self.seg_feat_channels
             self.ins_convs.append(
                 ConvModule(
@@ -81,6 +88,7 @@ class VERTHead(nn.Module):
                     3,
                     stride=1,
                     padding=1,
+                    conv_cfg=cfg_conv,
                     norm_cfg=norm_cfg,
                     bias=norm_cfg is None))
 
@@ -92,16 +100,20 @@ class VERTHead(nn.Module):
                     3,
                     stride=1,
                     padding=1,
+                    conv_cfg=cfg_conv,
                     norm_cfg=norm_cfg,
                     bias=norm_cfg is None))
 
-        self.vert_ins_list = nn.ModuleList()
+        self.dvert_ins_list_x = nn.ModuleList()
+        self.dvert_ins_list_y = nn.ModuleList()
         for seg_num_grid in self.seg_num_grids:
-            self.vert_ins_list.append(
+            self.dvert_ins_list_x.append(
                 nn.Conv2d(
-                    self.seg_feat_channels, seg_num_grid**2, 1))
-
-        self.vert_cate = nn.Conv2d(
+                    self.seg_feat_channels, seg_num_grid, 3, padding=1))
+            self.dvert_ins_list_y.append(
+                nn.Conv2d(
+                    self.seg_feat_channels, seg_num_grid, 3, padding=1))
+        self.dvert_cate = nn.Conv2d(
             self.seg_feat_channels, self.cate_out_channels, 3, padding=1)
 
     def init_weights(self):
@@ -110,19 +122,21 @@ class VERTHead(nn.Module):
         for m in self.cate_convs:
             normal_init(m.conv, std=0.01)
         bias_ins = bias_init_with_prob(0.01)
-        for m in self.vert_ins_list:
+        for m in self.dvert_ins_list_x:
+            normal_init(m, std=0.01, bias=bias_ins)
+        for m in self.dvert_ins_list_y:
             normal_init(m, std=0.01, bias=bias_ins)
         bias_cate = bias_init_with_prob(0.01)
-        normal_init(self.vert_cate, std=0.01, bias=bias_cate)
+        normal_init(self.dvert_cate, std=0.01, bias=bias_cate)
 
     def forward(self, feats, eval=False):
         new_feats = self.split_feats(feats)
         featmap_sizes = [featmap.size()[-2:] for featmap in new_feats]
         upsampled_size = (featmap_sizes[0][0] * 2, featmap_sizes[0][1] * 2)
-        ins_pred, cate_pred = multi_apply(self.forward_single, new_feats,
-                                          list(range(len(self.seg_num_grids))),
-                                          eval=eval, upsampled_size=upsampled_size)
-        return ins_pred, cate_pred
+        ins_pred_x, ins_pred_y, cate_pred = multi_apply(self.forward_single, new_feats,
+                                                        list(range(len(self.seg_num_grids))),
+                                                        eval=eval, upsampled_size=upsampled_size)
+        return ins_pred_x, ins_pred_y, cate_pred
 
     def split_feats(self, feats):
         return (F.interpolate(feats[0], scale_factor=0.5, mode='bilinear'),
@@ -144,11 +158,13 @@ class VERTHead(nn.Module):
         coord_feat = torch.cat([x, y], 1)
         ins_feat = torch.cat([ins_feat, coord_feat], 1)
 
-        for i, ins_layer in enumerate(self.ins_convs):
+        for ins_layer in self.ins_convs:
             ins_feat = ins_layer(ins_feat)
 
         ins_feat = F.interpolate(ins_feat, scale_factor=2, mode='bilinear')
-        ins_pred = self.vert_ins_list[idx](ins_feat)
+
+        ins_pred_x = self.dvert_ins_list_x[idx](ins_feat)
+        ins_pred_y = self.dvert_ins_list_y[idx](ins_feat)
 
         # cate branch
         for i, cate_layer in enumerate(self.cate_convs):
@@ -157,14 +173,17 @@ class VERTHead(nn.Module):
                 cate_feat = F.interpolate(cate_feat, size=seg_num_grid, mode='bilinear')
             cate_feat = cate_layer(cate_feat)
 
-        cate_pred = self.vert_cate(cate_feat)
+        cate_pred = self.dvert_cate(cate_feat)
+
         if eval:
-            ins_pred = F.interpolate(ins_pred.sigmoid(), size=upsampled_size, mode='bilinear')
+            ins_pred_x = F.interpolate(ins_pred_x.sigmoid(), size=upsampled_size, mode='bilinear')
+            ins_pred_y = F.interpolate(ins_pred_y.sigmoid(), size=upsampled_size, mode='bilinear')
             cate_pred = points_nms(cate_pred.sigmoid(), kernel=2).permute(0, 2, 3, 1)
-        return ins_pred, cate_pred
+        return ins_pred_x, ins_pred_y, cate_pred
 
     def loss(self,
-             ins_preds,
+             ins_preds_x,
+             ins_preds_y,
              cate_preds,
              gt_bbox_list,
              gt_label_list,
@@ -173,8 +192,8 @@ class VERTHead(nn.Module):
              cfg,
              gt_bboxes_ignore=None):
         featmap_sizes = [featmap.size()[-2:] for featmap in
-                         ins_preds]
-        ins_label_list, cate_label_list, ins_ind_label_list = multi_apply(
+                         ins_preds_x]
+        ins_label_list, cate_label_list, ins_ind_label_list, ins_ind_label_list_xy = multi_apply(
             self.vert_target_single,
             gt_bbox_list,
             gt_label_list,
@@ -187,30 +206,30 @@ class VERTHead(nn.Module):
                                  zip(ins_labels_level, ins_ind_labels_level)], 0)
                       for ins_labels_level, ins_ind_labels_level in zip(zip(*ins_label_list), zip(*ins_ind_label_list))]
 
-        ins_preds = [torch.cat([ins_preds_level_img[ins_ind_labels_level_img, ...]
-                                for ins_preds_level_img, ins_ind_labels_level_img in
-                                zip(ins_preds_level, ins_ind_labels_level)], 0)
-                     for ins_preds_level, ins_ind_labels_level in zip(ins_preds, zip(*ins_ind_label_list))]
+        ins_preds_x_final = [torch.cat([ins_preds_level_img_x[ins_ind_labels_level_img[:, 1], ...]
+                                for ins_preds_level_img_x, ins_ind_labels_level_img in
+                                zip(ins_preds_level_x, ins_ind_labels_level)], 0)
+                     for ins_preds_level_x, ins_ind_labels_level in
+                     zip(ins_preds_x, zip(*ins_ind_label_list_xy))]
 
+        ins_preds_y_final = [torch.cat([ins_preds_level_img_y[ins_ind_labels_level_img[:, 0], ...]
+                                  for ins_preds_level_img_y, ins_ind_labels_level_img in
+                                  zip(ins_preds_level_y, ins_ind_labels_level)], 0)
+                       for ins_preds_level_y, ins_ind_labels_level in
+                       zip(ins_preds_y, zip(*ins_ind_label_list_xy))]
 
-        ins_ind_labels = [
-            torch.cat([ins_ind_labels_level_img.flatten()
-                       for ins_ind_labels_level_img in ins_ind_labels_level])
-            for ins_ind_labels_level in zip(*ins_ind_label_list)
-        ]
-        flatten_ins_ind_labels = torch.cat(ins_ind_labels)
-
-        num_ins = flatten_ins_ind_labels.sum()
-
+        num_ins = 0.
         # dice loss
         loss_ins = []
-        for input, target in zip(ins_preds, ins_labels):
-            if input.size()[0] == 0:
+        for input_x, input_y, target in zip(ins_preds_x_final, ins_preds_y_final, ins_labels):
+            mask_n = input_x.size(0)
+            if mask_n == 0:
                 continue
-            input = torch.sigmoid(input)
+            num_ins += mask_n
+            input = (input_x.sigmoid())*(input_y.sigmoid())
             loss_ins.append(dice_loss(input, target))
-        loss_ins = torch.cat(loss_ins).mean()
-        loss_ins = loss_ins * self.ins_loss_weight
+
+        loss_ins = torch.cat(loss_ins).mean() * self.ins_loss_weight
 
         # cate
         cate_labels = [
@@ -238,26 +257,30 @@ class VERTHead(nn.Module):
                                featmap_sizes=None):
 
         device = gt_labels_raw[0].device
-
         # ins
         gt_areas = torch.sqrt((gt_bboxes_raw[:, 2] - gt_bboxes_raw[:, 0]) * (
                 gt_bboxes_raw[:, 3] - gt_bboxes_raw[:, 1]))
-
         ins_label_list = []
         cate_label_list = []
         ins_ind_label_list = []
+        ins_ind_label_list_xy = []
         for (lower_bound, upper_bound), stride, featmap_size, num_grid \
                 in zip(self.scale_ranges, self.strides, featmap_sizes, self.seg_num_grids):
 
-            ins_label = torch.zeros([num_grid ** 2, featmap_size[0], featmap_size[1]], dtype=torch.uint8, device=device)
+            ins_label = torch.zeros([num_grid**2, featmap_size[0], featmap_size[1]], dtype=torch.uint8, device=device)
             cate_label = torch.zeros([num_grid, num_grid], dtype=torch.int64, device=device)
-            ins_ind_label = torch.zeros([num_grid ** 2], dtype=torch.bool, device=device)
+            ins_ind_label = torch.zeros([num_grid**2], dtype=torch.bool, device=device)
 
             hit_indices = ((gt_areas >= lower_bound) & (gt_areas <= upper_bound)).nonzero().flatten()
+
             if len(hit_indices) == 0:
+                ins_label = torch.zeros([1, featmap_size[0], featmap_size[1]], dtype=torch.uint8,
+                                        device=device)
                 ins_label_list.append(ins_label)
                 cate_label_list.append(cate_label)
+                ins_ind_label = torch.zeros([1], dtype=torch.bool, device=device)
                 ins_ind_label_list.append(ins_ind_label)
+                ins_ind_label_list_xy.append(cate_label.nonzero())
                 continue
             gt_bboxes = gt_bboxes_raw[hit_indices]
             gt_labels = gt_labels_raw[hit_indices]
@@ -272,6 +295,7 @@ class VERTHead(nn.Module):
                 if seg_mask.sum() < 10:
                    continue
                 # mass center
+
                 upsampled_size = (featmap_sizes[0][0] * 4, featmap_sizes[0][1] * 4)
                 center_h, center_w = ndimage.measurements.center_of_mass(seg_mask)
                 coord_w = int((center_w / upsampled_size[1]) // (1. / num_grid))
@@ -288,6 +312,7 @@ class VERTHead(nn.Module):
                 left = max(coord_w-1, left_box)
                 right = min(right_box, coord_w+1)
 
+                # squared
                 cate_label[top:(down+1), left:(right+1)] = gt_label
                 # ins
                 seg_mask = mmcv.imrescale(seg_mask, scale=1. / output_stride)
@@ -297,125 +322,147 @@ class VERTHead(nn.Module):
                         label = int(i * num_grid + j)
                         ins_label[label, :seg_mask.shape[0], :seg_mask.shape[1]] = seg_mask
                         ins_ind_label[label] = True
-            ins_label_list.append(ins_label)
-            cate_label_list.append(cate_label)
-            ins_ind_label_list.append(ins_ind_label)
-        return ins_label_list, cate_label_list, ins_ind_label_list
 
-    def get_seg(self, seg_preds, cate_preds, img_metas, cfg, rescale=None):
-        assert len(seg_preds) == len(cate_preds)
+            ins_label = ins_label[ins_ind_label]
+            ins_label_list.append(ins_label)
+
+            cate_label_list.append(cate_label)
+
+            ins_ind_label = ins_ind_label[ins_ind_label]
+            ins_ind_label_list.append(ins_ind_label)
+
+            ins_ind_label_list_xy.append(cate_label.nonzero())
+        return ins_label_list, cate_label_list, ins_ind_label_list, ins_ind_label_list_xy
+
+    def get_seg(self, seg_preds_x, seg_preds_y, cate_preds, img_metas, cfg, rescale=None):
+        assert len(seg_preds_x) == len(cate_preds)
         num_levels = len(cate_preds)
-        featmap_size = seg_preds[0].size()[-2:]
+        featmap_size = seg_preds_x[0].size()[-2:]
 
         result_list = []
         for img_id in range(len(img_metas)):
             cate_pred_list = [
                 cate_preds[i][img_id].view(-1, self.cate_out_channels).detach() for i in range(num_levels)
             ]
-            seg_pred_list = [
-                seg_preds[i][img_id].detach() for i in range(num_levels)
+            seg_pred_list_x = [
+                seg_preds_x[i][img_id].detach() for i in range(num_levels)
+            ]
+            seg_pred_list_y = [
+                seg_preds_y[i][img_id].detach() for i in range(num_levels)
             ]
             img_shape = img_metas[img_id]['img_shape']
             scale_factor = img_metas[img_id]['scale_factor']
             ori_shape = img_metas[img_id]['ori_shape']
 
             cate_pred_list = torch.cat(cate_pred_list, dim=0)
-            seg_pred_list = torch.cat(seg_pred_list, dim=0)
+            seg_pred_list_x = torch.cat(seg_pred_list_x, dim=0)
+            seg_pred_list_y = torch.cat(seg_pred_list_y, dim=0)
 
-            result = self.get_seg_single(cate_pred_list, seg_pred_list,
+            result = self.get_seg_single(cate_pred_list, seg_pred_list_x, seg_pred_list_y,
                                          featmap_size, img_shape, ori_shape, scale_factor, cfg, rescale)
             result_list.append(result)
         return result_list
 
     def get_seg_single(self,
                        cate_preds,
-                       seg_preds,
+                       seg_preds_x,
+                       seg_preds_y,
                        featmap_size,
                        img_shape,
                        ori_shape,
                        scale_factor,
                        cfg,
                        rescale=False, debug=False):
-        assert len(cate_preds) == len(seg_preds)
+
 
         # overall info.
         h, w, _ = img_shape
         upsampled_size_out = (featmap_size[0] * 4, featmap_size[1] * 4)
 
+        # trans trans_diff.
+        trans_size = torch.Tensor(self.seg_num_grids).pow(2).cumsum(0).long()
+        trans_diff = torch.ones(trans_size[-1].item(), device=cate_preds.device).long()
+        num_grids = torch.ones(trans_size[-1].item(), device=cate_preds.device).long()
+        seg_size = torch.Tensor(self.seg_num_grids).cumsum(0).long()
+        seg_diff = torch.ones(trans_size[-1].item(), device=cate_preds.device).long()
+        strides = torch.ones(trans_size[-1].item(), device=cate_preds.device)
+
+        n_stage = len(self.seg_num_grids)
+        trans_diff[:trans_size[0]] *= 0
+        seg_diff[:trans_size[0]] *= 0
+        num_grids[:trans_size[0]] *= self.seg_num_grids[0]
+        strides[:trans_size[0]] *= self.strides[0]
+
+        for ind_ in range(1, n_stage):
+            trans_diff[trans_size[ind_ - 1]:trans_size[ind_]] *= trans_size[ind_ - 1]
+            seg_diff[trans_size[ind_ - 1]:trans_size[ind_]] *= seg_size[ind_ - 1]
+            num_grids[trans_size[ind_ - 1]:trans_size[ind_]] *= self.seg_num_grids[ind_]
+            strides[trans_size[ind_ - 1]:trans_size[ind_]] *= self.strides[ind_]
+
         # process.
         inds = (cate_preds > cfg.score_thr)
-        # category scores.
         cate_scores = cate_preds[inds]
+
+        inds = inds.nonzero()
+        trans_diff = torch.index_select(trans_diff, dim=0, index=inds[:, 0])
+        seg_diff = torch.index_select(seg_diff, dim=0, index=inds[:, 0])
+        num_grids = torch.index_select(num_grids, dim=0, index=inds[:, 0])
+        strides = torch.index_select(strides, dim=0, index=inds[:, 0])
+
+        y_inds = (inds[:, 0] - trans_diff) // num_grids
+        x_inds = (inds[:, 0] - trans_diff) % num_grids
+        y_inds += seg_diff
+        x_inds += seg_diff
+
+        cate_labels = inds[:, 1]
+        seg_masks_soft = seg_preds_x[x_inds, ...] * seg_preds_y[y_inds, ...]
+        seg_masks = seg_masks_soft > cfg.mask_thr
+        sum_masks = seg_masks.sum((1, 2)).float()
+        keep = sum_masks > strides
+
+        seg_masks_soft = seg_masks_soft[keep, ...]
+        seg_masks = seg_masks[keep, ...]
+        cate_scores = cate_scores[keep]
+        sum_masks = sum_masks[keep]
+        cate_labels = cate_labels[keep]
+        # mask scoring
+        seg_score = (seg_masks_soft * seg_masks.float()).sum((1, 2)) / sum_masks
+        cate_scores *= seg_score
+
         if len(cate_scores) == 0:
             return None
-        # category labels.
-        inds = inds.nonzero()
-        cate_labels = inds[:, 1]
-
-        # strides.
-        size_trans = cate_labels.new_tensor(self.seg_num_grids).pow(2).cumsum(0)
-        strides = cate_scores.new_ones(size_trans[-1])
-        n_stage = len(self.seg_num_grids)
-        strides[:size_trans[0]] *= self.strides[0]
-        for ind_ in range(1, n_stage):
-            strides[size_trans[ind_ - 1]:size_trans[ind_]] *= self.strides[ind_]
-        strides = strides[inds[:, 0]]
-
-        # masks.
-        seg_preds = seg_preds[inds[:, 0]]
-        seg_masks = seg_preds > cfg.mask_thr
-        sum_masks = seg_masks.sum((1, 2)).float()
-
-        # filter.
-        keep = sum_masks > strides
-        if keep.sum() == 0:
-            return None
-
-        seg_masks = seg_masks[keep, ...]
-        seg_preds = seg_preds[keep, ...]
-        sum_masks = sum_masks[keep]
-        cate_scores = cate_scores[keep]
-        cate_labels = cate_labels[keep]
-
-        # mask scoring.
-        seg_scores = (seg_preds * seg_masks.float()).sum((1, 2)) / sum_masks
-        cate_scores *= seg_scores
 
         # sort and keep top nms_pre
         sort_inds = torch.argsort(cate_scores, descending=True)
         if len(sort_inds) > cfg.nms_pre:
             sort_inds = sort_inds[:cfg.nms_pre]
+        seg_masks_soft = seg_masks_soft[sort_inds, :, :]
         seg_masks = seg_masks[sort_inds, :, :]
-        seg_preds = seg_preds[sort_inds, :, :]
-        sum_masks = sum_masks[sort_inds]
         cate_scores = cate_scores[sort_inds]
+        sum_masks = sum_masks[sort_inds]
         cate_labels = cate_labels[sort_inds]
 
         # Matrix NMS
         cate_scores = matrix_nms(seg_masks, cate_labels, cate_scores,
                                  kernel=cfg.kernel, sigma=cfg.sigma, sum_masks=sum_masks)
 
-        # filter.
         keep = cate_scores >= cfg.update_thr
-        if keep.sum() == 0:
-            return None
-        seg_preds = seg_preds[keep, :, :]
+        seg_masks_soft = seg_masks_soft[keep, :, :]
         cate_scores = cate_scores[keep]
         cate_labels = cate_labels[keep]
-
         # sort and keep top_k
         sort_inds = torch.argsort(cate_scores, descending=True)
         if len(sort_inds) > cfg.max_per_img:
             sort_inds = sort_inds[:cfg.max_per_img]
-        seg_preds = seg_preds[sort_inds, :, :]
+        seg_masks_soft = seg_masks_soft[sort_inds, :, :]
         cate_scores = cate_scores[sort_inds]
         cate_labels = cate_labels[sort_inds]
 
-        seg_preds = F.interpolate(seg_preds.unsqueeze(0),
-                                  size=upsampled_size_out,
-                                  mode='bilinear')[:, :, :h, :w]
-        seg_masks = F.interpolate(seg_preds,
-                                  size=ori_shape[:2],
-                                  mode='bilinear').squeeze(0)
+        seg_masks_soft = F.interpolate(seg_masks_soft.unsqueeze(0),
+                                    size=upsampled_size_out,
+                                    mode='bilinear')[:, :, :h, :w]
+        seg_masks = F.interpolate(seg_masks_soft,
+                               size=ori_shape[:2],
+                               mode='bilinear').squeeze(0)
         seg_masks = seg_masks > cfg.mask_thr
         return seg_masks, cate_labels, cate_scores
