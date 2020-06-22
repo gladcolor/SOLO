@@ -7,7 +7,7 @@ model = dict(
         depth=50,
         num_stages=4,
         out_indices=(0, 1, 2, 3), # C2, C3, C4, C5
-        frozen_stages=1,
+        frozen_stages=-1,
         style='pytorch'),
     neck=dict(
         type='FPN',
@@ -124,7 +124,7 @@ total_epochs = 1
 device_ids = range(8)
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = './work_dirs/vert_light_release_r50_fpn_8gpu_3x'
+work_dir = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
 load_from = None
 resume_from = None
 workflow = [('train', 1)]
