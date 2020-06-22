@@ -97,6 +97,8 @@ def make_cuda_ext(name, module, sources):
 
     define_macros = []
 
+    print("torch.cuda.is_available():", torch.cuda.is_available())
+
     if torch.cuda.is_available() or os.getenv('FORCE_CUDA', '0') == '1':
         define_macros += [("WITH_CUDA", None)]
     else:
