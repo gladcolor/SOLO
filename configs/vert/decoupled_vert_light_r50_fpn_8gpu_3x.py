@@ -86,7 +86,7 @@ test_pipeline = [
 
 # imgs_per_gpu=4,
 data = dict(
-    imgs_per_gpu=4,
+    imgs_per_gpu=2,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -127,7 +127,7 @@ total_epochs = 20
 device_ids = range(8)
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir =  '/home/h/hn235/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
-load_from = '/home/h/hn235/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x/epoch_2.pth'
+work_dir =  '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
+load_from = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x/epoch_2.pth'
 resume_from = None
 workflow = [('train', 1)]
