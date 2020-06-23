@@ -83,8 +83,10 @@ test_pipeline = [
             dict(type='Collect', keys=['img']),
         ])
 ]
+
+# imgs_per_gpu=4,
 data = dict(
-    imgs_per_gpu=2,
+    imgs_per_gpu=4,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -102,7 +104,7 @@ data = dict(
         img_prefix=data_root + 'test/images/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -110,7 +112,7 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
-    step=[3, 6])
+    step=[10, 16])
 checkpoint_config = dict(interval=1)
 # yapf:disable
 log_config = dict(
@@ -121,11 +123,11 @@ log_config = dict(
     ])
 # yapf:enable
 # runtime settings
-total_epochs = 10
+total_epochs = 20
 device_ids = range(8)
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
-load_from = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x/epoch_2.pth'
+work_dir =  '/home/h/hn235/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
+load_from = '/home/h/hn235/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x/epoch_2.pth'
 resume_from = None
 workflow = [('train', 1)]
