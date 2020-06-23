@@ -14,6 +14,10 @@ RUN apt-get update && apt-get install -y libglib2.0-0 libsm6 libxrender-dev libx
 
 # Install SOLO
 RUN conda install cython -y && conda clean --all
+RUN mkdir SOLO/
 RUN git clone https://github.com/WXinlong/SOLO.git /SOLO
 WORKDIR /SOLO
+ENV FORCE_CUDA="1"
 RUN pip install --no-cache-dir -e .
+RUN pip install pycocotools
+

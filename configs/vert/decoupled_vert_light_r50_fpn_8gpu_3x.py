@@ -56,7 +56,8 @@ train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
     dict(type='Resize',
-         img_scale=[(1000, 1000)],
+         img_scale=[(1000, 1000), (1000, 800), (1000, 600), (1000, 500), (1000, 480), (1000, 448),
+         (1000, 416), (1000, 384), (1000, 352)],
          # img_scale=[(1000, 1000), (852, 512), (852, 480), (852, 448),
          #            (852, 416), (852, 384), (852, 352)],
          multiscale_mode='value',
@@ -71,7 +72,7 @@ test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
         type='MultiScaleFlipAug',
-        img_scale=(852, 512),
+        img_scale=(1000, 1000),
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),
@@ -101,7 +102,7 @@ data = dict(
         img_prefix=data_root + 'test/images/',
         pipeline=test_pipeline))
 # optimizer
-optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -109,7 +110,7 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
-    step=[27, 33])
+    step=[3, 6])
 checkpoint_config = dict(interval=1)
 # yapf:disable
 log_config = dict(
@@ -120,11 +121,11 @@ log_config = dict(
     ])
 # yapf:enable
 # runtime settings
-total_epochs = 1
+total_epochs = 10
 device_ids = range(8)
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x'
-load_from = None
+load_from = '/media/huan/HD4T/Research/SOLO/work_dirs/vert_light_release_r50_fpn_8gpu_3x/epoch_2.pth'
 resume_from = None
 workflow = [('train', 1)]
